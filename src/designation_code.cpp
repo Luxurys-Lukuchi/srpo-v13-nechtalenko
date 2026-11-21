@@ -1,170 +1,114 @@
 #include "designation_code.hpp"
 
+#include <cassert>
 #include <cstddef>
+#include <string>
+#include <string_view>
+#include <utility>
 
 namespace srpo::v13 {
 
 namespace {
 
-// Проверяем диапазоны ASCII напрямую, чтобы не зависеть от системной локали
-// (в отличие от std::isupper / std::isdigit, поведение которых зависит от locale и char).
-bool is_upper_latin(char ch) {
+// Явные проверки ASCII-диапазонов безопаснее std::isupper/std::isdigit:
+// они не зависят от системной локали и не вызывают неопределенного поведения
+// на отрицательных значениях char (например, на байтах кириллицы в UTF-8).
+bool is_ascii_space(char ch) {
+    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\v' || ch == '\f';
+}
+
+bool is_uppercase_latin(char ch) {
     return ch >= 'A' && ch <= 'Z';
 }
 
-bool is_digit(char ch) {
+bool is_ascii_digit(char ch) {
     return ch >= '0' && ch <= '9';
 }
 
-bool is_whitespace(char ch) {
-    return ch == ' ' || ch == '\t' || ch == '\n' ||
-           ch == '\r' || ch == '\v' || ch == '\f';
+// Формирует результат отказа с готовым текстом для оболочки.
+EvaluationResult make_error(std::string message) {
+    EvaluationResult result;
+    result.ok = false;
+    result.error = std::move(message);
+    return result;
 }
 
-// Защитная проверка инвариантов структуры на случай,
-// если в модульных тестах или GUI передадут DesignationCode в обход parse_code.
-bool is_valid_record(const DesignationCode& code) {
-    if (code.letters.size() != 2) {
-        return false;
-    }
-    if (!is_upper_latin(code.letters[0]) || !is_upper_latin(code.letters[1])) {
-        return false;
-    }
-    return code.number >= 0 && code.number <= 9999;
-}
-
-// Форматирует целое число 0..9999 ровно в 4 десятичные цифры с ведущими нулями
-// без подключения тяжелых потоков ввода-вывода (<sstream>/<iomanip>).
+// Внутренняя функция форматирования целого числа 0..9999 ровно в 4 цифры с ведущими нулями.
+// Снаружи библиотеки недоступна: вызывается только после проверки диапазона.
 std::string format_number_4(int number) {
+    // Предусловие (внутренний инвариант): диапазон гарантирован вызывающим кодом.
+    // В Debug страхует от ошибок программиста, в Release (-DNDEBUG) удаляется препроцессором.
+    assert(number >= 0 && number <= 9999);
+
     std::string digits(4, '0');
     digits[0] = static_cast<char>('0' + (number / 1000) % 10);
     digits[1] = static_cast<char>('0' + (number / 100) % 10);
     digits[2] = static_cast<char>('0' + (number / 10) % 10);
     digits[3] = static_cast<char>('0' + number % 10);
+
+    // Постусловие: ширина числовой части строго 4 символа.
+    assert(digits.size() == 4);
     return digits;
 }
 
-} // namespace
+}  // namespace
 
-Result<DesignationCode> parse_code(std::string_view raw) {
-    if (raw.empty()) {
-        return Result<DesignationCode>::failure(
-            "Отказ: пустой ввод (ожидается формат LL-DDDD, например AB-1234).");
+EvaluationResult evaluate_code(std::string_view raw_input) {
+    // 1. Внешний контракт: проверяем вход пользователя через if (работает всегда, включая Release).
+    if (raw_input.empty()) {
+        return make_error("Отказ: пустой ввод (ожидается код в формате LL-DDDD, например AB-1234).");
     }
 
-    // По условию варианта вход — одно поле строго без пробельных символов.
-    for (char ch : raw) {
-        if (is_whitespace(ch)) {
-            return Result<DesignationCode>::failure(
-                "Отказ: вход должен состоять из одного поля без пробелов.");
+    for (char ch : raw_input) {
+        if (is_ascii_space(ch)) {
+            return make_error("Отказ: код не должен содержать пробелы или символы перевода строки.");
         }
     }
 
-    // Фиксированный формат: 2 буквы + 1 дефис + 4 цифры = ровно 7 символов.
-    if (raw.size() != 7) {
-        return Result<DesignationCode>::failure(
-            "Отказ: неверная длина кода (ожидается ровно 7 символов в формате LL-DDDD).");
+    if (raw_input.size() != 7) {
+        return make_error("Отказ: неверная длина кода (ожидается ровно 7 символов в формате LL-DDDD).");
     }
 
-    if (!is_upper_latin(raw[0]) || !is_upper_latin(raw[1])) {
-        return Result<DesignationCode>::failure(
-            "Отказ: первые два символа должны быть заглавными латинскими буквами (A-Z).");
+    if (!is_uppercase_latin(raw_input[0]) || !is_uppercase_latin(raw_input[1])) {
+        return make_error("Отказ: первые два символа должны быть заглавными латинскими буквами (A-Z).");
     }
 
-    if (raw[2] != '-') {
-        return Result<DesignationCode>::failure(
-            "Отказ: третий символ должен быть дефисом '-'.");
+    if (raw_input[2] != '-') {
+        return make_error("Отказ: на третьей позиции должен стоять дефис '-'.");
     }
 
+    int number = 0;
     for (std::size_t i = 3; i < 7; ++i) {
-        if (!is_digit(raw[i])) {
-            return Result<DesignationCode>::failure(
-                "Отказ: после дефиса должны стоять ровно четыре десятичные цифры (0-9).");
+        if (!is_ascii_digit(raw_input[i])) {
+            return make_error("Отказ: последние четыре символа должны быть десятичными цифрами (0-9).");
         }
+        number = number * 10 + (raw_input[i] - '0');
     }
 
-    // Переводим 4 проверенных символа-цифры в целое число 0..9999.
-    const int number = (raw[3] - '0') * 1000 +
-                       (raw[4] - '0') * 100 +
-                       (raw[5] - '0') * 10 +
-                       (raw[6] - '0');
+    // По условию варианта 13 переход через 9999 не определен.
+    if (number == 9999) {
+        return make_error("Отказ: следующий код после 9999 не определен.");
+    }
 
-    DesignationCode parsed{std::string(raw.substr(0, 2)), number};
-    return Result<DesignationCode>::success(std::move(parsed));
+    // 2. Все проверки внешнего входа пройдены — фиксируем внутренние инварианты перед расчетом.
+    const std::string letters(raw_input.substr(0, 2));
+    assert(letters.size() == 2);
+    assert(number >= 0 && number <= 9998);
+
+    // 3. Выполняем четыре операции варианта 13.
+    EvaluationResult result;
+    result.ok = true;
+    result.letters = letters;
+    result.number = number;
+    result.formatted_code = letters + "-" + format_number_4(number);
+    result.next_code = letters + "-" + format_number_4(number + 1);
+
+    // 4. Постусловия корректного результата (проверяются в Debug, вырезаются в Release).
+    assert(result.formatted_code.size() == 7 && result.formatted_code[2] == '-');
+    assert(result.next_code.size() == 7 && result.next_code[2] == '-');
+    assert(result.ok && result.error.empty());
+
+    return result;
 }
 
-Result<std::string> get_letters(const DesignationCode& code) {
-    if (!is_valid_record(code)) {
-        return Result<std::string>::failure(
-            "Отказ: некорректная запись кода обозначения.");
-    }
-    return Result<std::string>::success(code.letters);
-}
-
-Result<int> get_number(const DesignationCode& code) {
-    if (!is_valid_record(code)) {
-        return Result<int>::failure(
-            "Отказ: некорректная запись кода обозначения.");
-    }
-    return Result<int>::success(code.number);
-}
-
-Result<std::string> format_code(const DesignationCode& code) {
-    if (!is_valid_record(code)) {
-        return Result<std::string>::failure(
-            "Отказ: некорректная запись кода обозначения.");
-    }
-    return Result<std::string>::success(code.letters + "-" + format_number_4(code.number));
-}
-
-Result<std::string> next_code(const DesignationCode& code) {
-    if (!is_valid_record(code)) {
-        return Result<std::string>::failure(
-            "Отказ: некорректная запись кода обозначения.");
-    }
-    // По контракту переход через 9999 не определен и является явным отказом.
-    if (code.number >= 9999) {
-        return Result<std::string>::failure(
-            "Отказ: следующий код после 9999 не определен.");
-    }
-    return Result<std::string>::success(code.letters + "-" + format_number_4(code.number + 1));
-}
-
-Result<EvaluationReport> evaluate_code(std::string_view raw) {
-    const auto parsed = parse_code(raw);
-    if (!parsed.ok) {
-        return Result<EvaluationReport>::failure(parsed.error);
-    }
-
-    // Последовательно выполняем все 4 операции карточки; при отказе любой из них
-    // (например, next_code для 9999) возвращаем ошибку без частичных результатов.
-    const auto letters = get_letters(parsed.value);
-    if (!letters.ok) {
-        return Result<EvaluationReport>::failure(letters.error);
-    }
-
-    const auto number = get_number(parsed.value);
-    if (!number.ok) {
-        return Result<EvaluationReport>::failure(number.error);
-    }
-
-    const auto formatted = format_code(parsed.value);
-    if (!formatted.ok) {
-        return Result<EvaluationReport>::failure(formatted.error);
-    }
-
-    const auto next = next_code(parsed.value);
-    if (!next.ok) {
-        return Result<EvaluationReport>::failure(next.error);
-    }
-
-    EvaluationReport report{
-        letters.value,
-        number.value,
-        formatted.value,
-        next.value
-    };
-    return Result<EvaluationReport>::success(std::move(report));
-}
-
-} // namespace srpo::v13
+}  // namespace srpo::v13

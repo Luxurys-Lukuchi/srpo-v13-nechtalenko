@@ -3,10 +3,10 @@
 #include <iostream>
 #include <string>
 
-// Платформозависимые заголовки изолированы в оболочке: предметная библиотека
-// остается переносимой и не зависит от ОС и консоли.
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
@@ -14,54 +14,58 @@
 
 namespace {
 
-// Определяет, запущена ли программа в интерактивной консоли (ввод с клавиатуры),
-// а не через перенаправление файла или конвейер (pipe).
-bool is_interactive_input() {
+// Включает кодировку UTF-8 в консоли Windows для корректного вывода кириллицы.
+void configure_console_utf8() {
 #ifdef _WIN32
-    DWORD mode = 0;
-    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode) != 0;
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+}
+
+// Определяет, запущена ли программа интерактивно (ввод с клавиатуры)
+// или данные поданы через конвейер/перенаправление (например, "GH-0001" | .\app.exe).
+bool is_interactive_stdin() {
+#ifdef _WIN32
+    DWORD console_mode = 0;
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &console_mode) != 0;
 #else
     return isatty(STDIN_FILENO) != 0;
 #endif
 }
 
-} // namespace
+}  // namespace
 
 int main() {
-#ifdef _WIN32
-    // Автоматически переключаем кодовую страницу консоли Windows в UTF-8,
-    // чтобы кириллица отображалась корректно без ручного вызова `chcp 65001`.
-    SetConsoleCP(CP_UTF8);
-    SetConsoleOutputCP(CP_UTF8);
-#endif
+    configure_console_utf8();
 
-    // Показываем подсказку только при ручном вводе, чтобы не засорять вывод в автотестах.
-    if (is_interactive_input()) {
+    // При интерактивном запуске показываем пример ввода.
+    if (is_interactive_stdin()) {
         std::cout << "Введите код обозначения (формат LL-DDDD, например AB-1234): " << std::flush;
     }
 
-    // Консольная оболочка читает ровно одну строку и ничего не вычисляет сама.
-    std::string line;
-    if (!std::getline(std::cin, line)) {
-        line.clear();
+    // Читаем ровно одну строку (при пустом потоке line останется пустой, и отказ сформирует библиотека).
+    std::string input_line;
+    std::getline(std::cin, input_line);
+
+    // Убираем завершающий '\r' на случай файла/конвейера с Windows-переводами строк CRLF.
+    if (!input_line.empty() && input_line.back() == '\r') {
+        input_line.pop_back();
     }
 
-    // Убираем хвостовой '\r' на случай чтения строк с переносами Windows (CRLF).
-    if (!line.empty() && line.back() == '\r') {
-        line.pop_back();
-    }
+    // Передаем запись в предметную библиотеку — вся логика и текст отказа находятся там.
+    const srpo::v13::EvaluationResult result = srpo::v13::evaluate_code(input_line);
 
-    // Все проверки, вычисления и формирование текста отказа выполняет библиотека.
-    const auto result = srpo::v13::evaluate_code(line);
     if (!result.ok) {
+        // Неверный вход отвергается явно, программа завершается штатно без печати результатов.
         std::cout << result.error << '\n';
-        return 0; // Штатное завершение при отказе по контракту задания
+        return 0;
     }
 
-    std::cout << "1. Буквенная часть: " << result.value.letters << '\n';
-    std::cout << "2. Числовая часть: " << result.value.number << '\n';
-    std::cout << "3. Строка кода: " << result.value.formatted_code << '\n';
-    std::cout << "4. Следующий код: " << result.value.next_code << '\n';
+    // Выводим результаты всех четырех операций варианта 13.
+    std::cout << "1. Буквенная часть: " << result.letters << '\n';
+    std::cout << "2. Числовая часть: " << result.number << '\n';
+    std::cout << "3. Строка кода: " << result.formatted_code << '\n';
+    std::cout << "4. Следующий код: " << result.next_code << '\n';
 
     return 0;
 }
